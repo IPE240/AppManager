@@ -7,6 +7,9 @@ import tkinter as tk
 from tkinter import messagebox
 import subprocess
 import re
+import os
+import threading
+import queue
 from pathlib import Path
 
 APPS_DIR  = Path("C:/Apps")
@@ -72,12 +75,16 @@ class App(tk.Tk):
         super().__init__()
         self.title("ODS – Menedżer usług")
         self.configure(bg=BG)
-        self.resizable(False, False)
+        self.resizable(False, True)        # pionowo można rozciągać (konsola)
         self.protocol("WM_DELETE_WINDOW", self.iconify)   # X → minimalizuj
         self.apps = discover_apps()
         self.rows = []
+        self.console_cwd = SELF_DIR        # katalog roboczy wbudowanej konsoli
+        self.ui_q = queue.Queue()          # kolejka GUI (wątki NIE dotykają Tk)
         self._build()
         self._poll()
+        self.log(f"Konsola gotowa. Katalog: {self.console_cwd}")
+        self._drain()                      # pętla opróżniająca kolejkę do konsoli
 
     def _build(self):
         tk.Label(self, text="ODS – Menedżer usług", bg=BG, fg=FG,
@@ -108,10 +115,17 @@ class App(tk.Tk):
                             command=lambda a=app, b=None: self._toggle(a))
             btn.pack(side="right", padx=(8, 0))
 
+            pull_btn = tk.Button(row, text="Pull", width=6,
+                                 bg=BTN_BG, fg=FG, relief="flat",
+                                 activebackground=BTN_ACT, activeforeground=FG,
+                                 font=("Segoe UI", 9))
+            pull_btn.config(command=lambda a=app, b=pull_btn: self._pull(a, b))
+            pull_btn.pack(side="right", padx=(8, 0))
+
             tk.Label(row, text=app["port"], bg=bg, fg="#6e7a9a",
                      font=("Consolas", 9), width=6, anchor="e").pack(side="right", padx=(12, 0))
 
-            self.rows.append({"dot": dot, "btn": btn, "app": app, "bg": bg})
+            self.rows.append({"dot": dot, "btn": btn, "pull": pull_btn, "app": app, "bg": bg})
 
         # ── przyciski globalne ────────────────────────────────
         bar = tk.Frame(self, bg=BG)
@@ -132,6 +146,44 @@ class App(tk.Tk):
         # ── bind przycisków (musi być po stworzeniu rows) ────
         for r in self.rows:
             r["btn"].config(command=lambda row=r: self._toggle(row))
+
+        # ── konsola (output) ──────────────────────────────────
+        con = tk.Frame(self, bg=BG)
+        con.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+
+        head = tk.Frame(con, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="Konsola", bg=BG, fg=GRAY,
+                 font=("Segoe UI", 9, "italic")).pack(side="left")
+        tk.Button(head, text="Wyczyść", bg=BTN_BG, fg=FG, relief="flat",
+                  activebackground=BTN_ACT, activeforeground=FG,
+                  font=("Segoe UI", 8), command=self._clear_console).pack(side="right")
+
+        txt = tk.Frame(con, bg=BG)
+        txt.pack(fill="both", expand=True, pady=(4, 0))
+        sb = tk.Scrollbar(txt)
+        sb.pack(side="right", fill="y")
+        self.console = tk.Text(txt, height=12, bg="#11111b", fg=FG,
+                               insertbackground=FG, relief="flat", wrap="word",
+                               font=("Consolas", 9), yscrollcommand=sb.set,
+                               state="disabled")
+        self.console.pack(side="left", fill="both", expand=True)
+        sb.config(command=self.console.yview)
+
+        # ── linia wejścia (I/O) ───────────────────────────────
+        cmd = tk.Frame(self, bg=BG)
+        cmd.pack(fill="x", padx=16, pady=(0, 12))
+        tk.Label(cmd, text="›", bg=BG, fg=GREEN,
+                 font=("Consolas", 12, "bold")).pack(side="left", padx=(0, 6))
+        self.cmd_var = tk.StringVar()
+        self.cmd_entry = tk.Entry(cmd, textvariable=self.cmd_var, bg=ROW_A, fg=FG,
+                                  insertbackground=FG, relief="flat",
+                                  font=("Consolas", 10))
+        self.cmd_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.cmd_entry.bind("<Return>", self._run_cmd)
+        tk.Button(cmd, text="▶", width=3, bg=BTN_BG, fg=FG, relief="flat",
+                  activebackground=BTN_ACT, activeforeground=FG,
+                  font=("Segoe UI", 9), command=self._run_cmd).pack(side="left", padx=(8, 0))
 
     def _running(self, app):
         p = app["proc"]
@@ -155,12 +207,19 @@ class App(tk.Tk):
                            "-File", str(launcher)], False)
         else:
             cmd, shell = str(launcher), True
+        # PYTHONUNBUFFERED=1 → output np. Streamlita pojawia się od razu, nie w blokach
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         app["proc"] = subprocess.Popen(
             cmd,
             cwd=str(app["dir"]),
             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-            shell=shell,
+            shell=shell, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", bufsize=1,
         )
+        self.log(f"▶ start: {app['name']}")
+        threading.Thread(target=self._reader, args=(app, app["proc"]),
+                         daemon=True).start()
 
     def _stop(self, app):
         p = app["proc"]
@@ -170,6 +229,44 @@ class App(tk.Tk):
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             app["proc"] = None
+            self.log(f"■ stop: {app['name']}")
+
+    def _reader(self, app, proc):
+        # strumieniuje output procesu serwera do konsoli (wątek w tle)
+        for line in proc.stdout:
+            self.log(line.rstrip("\n"), source=app["name"])
+        self.log(f"proces zakończony (kod {proc.poll()})", source=app["name"])
+
+    # ── git pull ──────────────────────────────────────────────
+    def _pull(self, app, btn):
+        # pull w tle, żeby nie zamrażać GUI; przycisk na ten czas blokujemy
+        btn.config(state="disabled", text="…")
+        self.log(f"⟳ git pull: {app['name']}")
+        threading.Thread(target=self._pull_worker, args=(app, btn), daemon=True).start()
+
+    def _pull_worker(self, app, btn):
+        # GIT_TERMINAL_PROMPT=0 → git nie wisi czekając na login, tylko zwraca błąd
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        try:
+            res = subprocess.run(
+                ["git", "pull"],
+                cwd=str(app["dir"]),
+                capture_output=True, text=True, errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                env=env, timeout=120,
+            )
+            ok = res.returncode == 0
+            out = (res.stdout + res.stderr).strip() or "(brak komunikatu)"
+        except FileNotFoundError:
+            ok, out = False, "Nie znaleziono polecenia 'git' w PATH."
+        except subprocess.TimeoutExpired:
+            ok, out = False, "Przekroczono limit czasu (120 s) – pull przerwany."
+        except Exception as e:
+            ok, out = False, str(e)
+        self.log(out, source=f"git:{app['name']}")
+        self.log(f"{'✓' if ok else '✗'} git pull {app['name']} — "
+                 f"{'OK' if ok else 'błąd'}")
+        self.ui(lambda: btn.config(state="normal", text="Pull"))
 
     def _start_all(self):
         for r in self.rows:
@@ -197,6 +294,90 @@ class App(tk.Tk):
     def _poll(self):
         self._refresh()
         self.after(3000, self._poll)
+
+    # ── konsola: output ───────────────────────────────────────
+    def log(self, text, source=None):
+        # bezpieczne z każdego wątku – tylko wkłada do kolejki, nie dotyka Tk
+        self.ui_q.put(f"[{source}] {text}\n" if source else f"{text}\n")
+
+    def ui(self, fn):
+        # wykonaj operację na widgetach w wątku GUI (zachowuje kolejność z logami)
+        self.ui_q.put(fn)
+
+    def _drain(self):
+        # jedyne miejsce, które dotyka konsoli – działa w wątku GUI
+        buf = []
+        try:
+            while True:
+                item = self.ui_q.get_nowait()
+                if callable(item):
+                    if buf:
+                        self._append("".join(buf)); buf = []
+                    item()
+                else:
+                    buf.append(item)
+        except queue.Empty:
+            pass
+        if buf:
+            self._append("".join(buf))
+        self.after(100, self._drain)
+
+    def _append(self, line):
+        self.console.config(state="normal")
+        self.console.insert("end", line)
+        n = int(self.console.index("end-1c").split(".")[0])
+        if n > 1200:                                   # ogranicz bufor do ~1000 linii
+            self.console.delete("1.0", f"{n - 1000}.0")
+        self.console.see("end")
+        self.console.config(state="disabled")
+
+    def _clear_console(self):
+        self.console.config(state="normal")
+        self.console.delete("1.0", "end")
+        self.console.config(state="disabled")
+
+    # ── konsola: input (I/O) ──────────────────────────────────
+    def _run_cmd(self, event=None):
+        cmd = self.cmd_var.get().strip()
+        if not cmd:
+            return
+        self.cmd_var.set("")
+        low = cmd.lower()
+        if low in ("cls", "clear"):
+            self._clear_console()
+            return
+        if low == "cd" or low.startswith("cd "):
+            self._change_dir(cmd[2:].strip())
+            return
+        self.log(f"{self.console_cwd}› {cmd}")
+        threading.Thread(target=self._cmd_worker, args=(cmd,), daemon=True).start()
+
+    def _cmd_worker(self, cmd):
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(self.console_cwd), shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace", bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            for line in proc.stdout:
+                self.log(line.rstrip("\n"))
+            proc.wait()
+            self.log(f"[zakończono, kod {proc.returncode}]")
+        except Exception as e:
+            self.log(f"[błąd] {e}")
+
+    def _change_dir(self, path):
+        if not path:
+            self.log(str(self.console_cwd))
+            return
+        target = Path(path) if os.path.isabs(path) else self.console_cwd / path
+        target = target.resolve()
+        if target.is_dir():
+            self.console_cwd = target
+            self.log(f"[cwd] {target}")
+        else:
+            self.log(f"[błąd] nie ma katalogu: {target}")
 
 
 if __name__ == "__main__":
