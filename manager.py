@@ -11,7 +11,8 @@ from pathlib import Path
 
 APPS_DIR  = Path("C:/Apps")
 SELF_DIR  = Path(__file__).parent.resolve()   # wyklucz własny folder niezależnie od nazwy
-LAUNCHERS = ["uruchom", "start"]              # priorytetowe nazwy pliku startowego
+LAUNCHERS = ["uruchom_lan", "uruchom", "start"]  # priorytetowe nazwy pliku startowego (uruchom_lan ma pierwszeństwo)
+EXTS      = (".bat", ".ps1", ".exe")             # dozwolone rozszerzenia, w kolejności priorytetu
 
 # ── wykryj port aplikacji ─────────────────────────────────────
 PORT_RE = re.compile(r"(?:SERVER_)?PORT\s*[=:]\s*[\"']?(\d{2,5})[\"']?", re.IGNORECASE)
@@ -37,7 +38,7 @@ def find_port(folder: Path):
 def find_launcher(folder: Path):
     candidates = LAUNCHERS + [folder.name]
     for name in candidates:
-        for ext in (".bat", ".exe"):
+        for ext in EXTS:
             f = folder / (name + ext)
             if f.exists():
                 return f
@@ -147,11 +148,18 @@ class App(tk.Tk):
     def _start(self, app):
         if self._running(app):
             return
+        launcher = app["launcher"]
+        if launcher.suffix.lower() == ".ps1":
+            # .ps1 nie uruchomi cmd – trzeba wprost przez PowerShell
+            cmd, shell = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                           "-File", str(launcher)], False)
+        else:
+            cmd, shell = str(launcher), True
         app["proc"] = subprocess.Popen(
-            str(app["launcher"]),
+            cmd,
             cwd=str(app["dir"]),
             creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-            shell=True,
+            shell=shell,
         )
 
     def _stop(self, app):
