@@ -60,6 +60,7 @@ BG      = "#1e1e2e"
 ROW_A   = "#252535"
 ROW_B   = "#1e1e2e"
 FG      = "#cdd6f4"
+GRAY    = "#6c7086"
 GREEN   = "#a6e3a1"
 RED     = "#f38ba8"
 BTN_BG  = "#313244"
@@ -95,15 +96,19 @@ class App(tk.Tk):
             tk.Label(row, text=app["name"], bg=bg, fg=FG,
                      font=("Segoe UI", 10), width=26, anchor="w").pack(side="left")
 
-            tk.Label(row, text=app["port"], bg=bg, fg="#6e7a9a",
-                     font=("Consolas", 9), width=6, anchor="e").pack(side="left")
+            # nazwa pliku startowego + ścieżka (szaro, kursywą)
+            tk.Label(row, text=str(app["launcher"]), bg=bg, fg=GRAY,
+                     font=("Segoe UI", 9, "italic"), anchor="w").pack(side="left")
 
             btn = tk.Button(row, text="Start", width=8,
                             bg=BTN_BG, fg=FG, relief="flat",
                             activebackground=BTN_ACT, activeforeground=FG,
                             font=("Segoe UI", 9),
                             command=lambda a=app, b=None: self._toggle(a))
-            btn.pack(side="left", padx=(8, 0))
+            btn.pack(side="right", padx=(8, 0))
+
+            tk.Label(row, text=app["port"], bg=bg, fg="#6e7a9a",
+                     font=("Consolas", 9), width=6, anchor="e").pack(side="right", padx=(12, 0))
 
             self.rows.append({"dot": dot, "btn": btn, "app": app, "bg": bg})
 
