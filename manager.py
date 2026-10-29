@@ -54,7 +54,11 @@ def find_launcher(folder: Path):
 # ── zbierz listę aplikacji ────────────────────────────────────
 def discover_apps():
     apps = []
-    for d in sorted(APPS_DIR.iterdir()):
+    try:
+        entries = sorted(APPS_DIR.iterdir())
+    except OSError:
+        return apps                      # brak/niedostępny C:\Apps → pusta lista
+    for d in entries:
         if not d.is_dir() or d.resolve() == SELF_DIR or d.name.startswith("."):
             continue
         launcher = find_launcher(d)
@@ -149,6 +153,11 @@ class App(tk.Tk):
         self._build()
         self._poll()
         self.log(f"Konsola gotowa. Katalog: {self.console_cwd}")
+        if not APPS_DIR.exists():
+            self.log(f"⚠ Katalog {APPS_DIR} nie istnieje — brak aplikacji do pokazania. "
+                     f"Podłącz/utwórz go i uruchom menedżera ponownie.")
+        elif not self.apps:
+            self.log(f"⚠ W {APPS_DIR} nie znaleziono aplikacji z plikiem startowym.")
         self._drain()                      # pętla opróżniająca kolejkę do konsoli
         self._start_control()              # serwer sterujący (zdalne komendy)
 
@@ -192,6 +201,13 @@ class App(tk.Tk):
                      font=("Consolas", 9), width=6, anchor="e").pack(side="right", padx=(12, 0))
 
             self.rows.append({"dot": dot, "btn": btn, "pull": pull_btn, "app": app, "bg": bg})
+
+        if not self.apps:                   # brak aplikacji → czytelny komunikat
+            msg = (f"Nie znaleziono katalogu {APPS_DIR}"
+                   if not APPS_DIR.exists()
+                   else f"Brak aplikacji w {APPS_DIR}")
+            tk.Label(frame, text=msg, bg=BG, fg=GRAY,
+                     font=("Segoe UI", 10, "italic"), pady=20).pack()
 
         # ── przyciski globalne ────────────────────────────────
         bar = tk.Frame(self, bg=BG)
@@ -562,4 +578,15 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    # pod pythonw nie ma konsoli – błąd startu byłby niewidoczny; zapisz go do pliku
+    try:
+        App().mainloop()
+    except Exception:
+        import traceback, datetime
+        try:
+            (SELF_DIR / "ods_error.log").write_text(
+                datetime.datetime.now().isoformat() + "\n\n" + traceback.format_exc(),
+                encoding="utf-8")
+        except Exception:
+            pass
+        raise
