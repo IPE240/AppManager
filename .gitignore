@@ -1,0 +1,5 @@
+# sekret endpointu sterującego – NIE commitować
+ods_control.json
+
+__pycache__/
+*.pyc
